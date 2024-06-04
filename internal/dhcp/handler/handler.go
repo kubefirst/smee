@@ -17,3 +17,15 @@ type BackendReader interface {
 	GetByMac(context.Context, net.HardwareAddr) (*data.DHCP, *data.Netboot, error)
 	GetByIP(context.Context, net.IP) (*data.DHCP, *data.Netboot, error)
 }
+
+// BackendWriter is the interface for writing data to a backend.
+type BackendWriter interface {
+	// Write data (to a backend) based on a mac address for creating a new hardware.
+	CreateByMac(context.Context, net.HardwareAddr) error
+}
+
+// BackendReadWriter is the interface for getting and setting data from a backend.
+type BackendReadWriter interface {
+	BackendReader
+	BackendWriter
+}

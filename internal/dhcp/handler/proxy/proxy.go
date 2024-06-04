@@ -23,6 +23,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/insomniacslk/dhcp/dhcpv4"
+	"github.com/tinkerbell/smee/internal/backend/kube"
 	"github.com/tinkerbell/smee/internal/dhcp"
 	"github.com/tinkerbell/smee/internal/dhcp/data"
 	"github.com/tinkerbell/smee/internal/dhcp/handler"
@@ -39,7 +40,7 @@ const tracerName = "github.com/tinkerbell/smee/internal/dhcp/handler/proxy"
 // Handler holds the configuration details for the running the DHCP server.
 type Handler struct {
 	// Backend is the backend to use for getting DHCP data.
-	Backend handler.BackendReader
+	Backend handler.BackendReadWriter
 
 	// IPAddr is the IP address to use in DHCP responses.
 	// Option 54 and the sname DHCP header.
@@ -58,6 +59,9 @@ type Handler struct {
 	// For example, the filename will be "snp.efi-00-23b1e307bb35484f535a1f772c06910e-d887dc3912240434-01".
 	// <original filename>-00-<trace id>-<span id>-<trace flags>
 	OTELEnabled bool
+
+	// AutoDiscoveryEnabled is a flag that determines whether a new hardware entry should be created upon receiving a DHCP request.
+	AutoDiscoveryEnabled bool
 }
 
 // Netboot holds the netboot configuration details used in running a DHCP server.
@@ -184,12 +188,17 @@ func (h *Handler) Handle(ctx context.Context, conn *ipv4.PacketConn, dp data.Pac
 	// set bootfile header
 	reply.BootFileName = i.Bootfile("", h.Netboot.IPXEScriptURL(dp.Pkt), h.Netboot.IPXEBinServerHTTP, h.Netboot.IPXEBinServerTFTP)
 
+	var notHardwareFound bool
 	// check the backend, if PXE is NOT allowed, set the boot file name to "/<mac address>/not-allowed"
 	_, n, err := h.Backend.GetByMac(ctx, dp.Pkt.ClientHWAddr)
-	if err != nil || (n != nil && !n.AllowNetboot) {
-		log.V(1).Info("Ignoring packet", "error", err.Error(), "netbootAllowed", n.AllowNetboot)
-		span.SetStatus(codes.Ok, "netboot not allowed")
-		return
+	if err != nil {
+		notHardwareFound = kube.IsHardwareNotFoundError(err)
+		if n != nil && !n.AllowNetboot {
+			log.V(1).Info("Ignoring packet", "error", err.Error(), "netbootAllowed", n.AllowNetboot)
+			span.SetStatus(codes.Ok, "netboot not allowed")
+			return
+		}
+		log.Error(err, "failed to get hardware by mac")
 	}
 	log.Info(
 		"received DHCP packet",
@@ -220,6 +229,16 @@ func (h *Handler) Handle(ctx context.Context, conn *ipv4.PacketConn, dp data.Pac
 	log.Info("Sent ProxyDHCP response")
 	span.SetAttributes(h.encodeToAttributes(reply, "reply")...)
 	span.SetStatus(codes.Ok, "sent DHCP response")
+
+	// Create a new hardware entry if AutoDiscoveryEnabled is set to true and a hardware entry does not already exist.
+	if notHardwareFound && h.AutoDiscoveryEnabled && reply.MessageType() == dhcpv4.MessageTypeAck {
+		log.Info("AutoDiscoveryEnabled - Creating a new hardware entry", "mac", dp.Pkt.ClientHWAddr.String())
+		if err := h.Backend.CreateByMac(ctx, dp.Pkt.ClientHWAddr); err != nil {
+			log.Error(err, "failed to create hardware entry")
+			span.SetStatus(codes.Error, err.Error())
+			return
+		}
+	}
 }
 
 // encodeToAttributes takes a DHCP packet and returns opentelemetry key/value attributes.
