@@ -8,19 +8,23 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
+	"strings"
 
 	"github.com/tinkerbell/smee/internal/dhcp/data"
 	"github.com/tinkerbell/tink/api/v1alpha1"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/cluster"
 )
 
 const tracerName = "github.com/tinkerbell/smee/dhcp"
+const tinkerbellNamespace = "tink-system"
 
 // Backend is a backend implementation that uses the Tinkerbell CRDs to get DHCP data.
 type Backend struct {
@@ -180,6 +184,42 @@ func (b *Backend) GetByIP(ctx context.Context, ip net.IP) (*data.DHCP, *data.Net
 	span.SetStatus(codes.Ok, "")
 
 	return d, n, nil
+}
+
+func (b *Backend) CreateByMac(ctx context.Context, mac net.HardwareAddr) error {
+	tracer := otel.Tracer(tracerName)
+	ctx, span := tracer.Start(ctx, "backend.kube.CreateByMac")
+	defer span.End()
+
+	hardware := &v1alpha1.Hardware{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      strings.Replace(mac.String(), ":", "-", -1),
+			Namespace: tinkerbellNamespace,
+			Labels: map[string]string{
+				"created-by": "autodiscovery",
+			},
+		},
+		Spec: v1alpha1.HardwareSpec{
+			Interfaces: []v1alpha1.Interface{
+				{
+					DHCP: &v1alpha1.DHCP{
+						MAC: mac.String(),
+					},
+					Netboot: &v1alpha1.Netboot{
+						AllowPXE:      ptr.To[bool](true),
+						AllowWorkflow: ptr.To[bool](true),
+					},
+				},
+			},
+		},
+	}
+
+	if err := b.cluster.GetClient().Create(ctx, hardware); err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return fmt.Errorf("failed to create hardware for (%v): %w", mac, err)
+	}
+
+	return nil
 }
 
 // toDHCPData converts a v1alpha1.DHCP to a data.DHCP data structure.

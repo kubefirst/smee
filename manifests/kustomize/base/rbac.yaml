@@ -19,6 +19,7 @@ rules:
       - get
       - list
       - watch
+      - create
   - apiGroups:
       - tinkerbell.org
     resources:

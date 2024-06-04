@@ -90,6 +90,7 @@ type ipxeHTTPScript struct {
 type dhcpConfig struct {
 	enabled           bool
 	mode              string
+	autoDiscovery     bool
 	bindAddr          string
 	bindInterface     string
 	ipForPacket       string
@@ -344,7 +345,7 @@ func (c *config) dhcpHandler(ctx context.Context, log logr.Logger) (server.Handl
 		return dh, nil
 	case "proxy":
 		dh := &proxy.Handler{
-			Backend: backend,
+			Backend: backend.(handler.BackendReadWriter),
 			IPAddr:  pktIP,
 			Log:     log,
 			Netboot: proxy.Netboot{
@@ -353,7 +354,8 @@ func (c *config) dhcpHandler(ctx context.Context, log logr.Logger) (server.Handl
 				IPXEScriptURL:     ipxeScript,
 				Enabled:           true,
 			},
-			OTELEnabled: true,
+			OTELEnabled:          true,
+			AutoDiscoveryEnabled: c.dhcp.autoDiscovery,
 		}
 		return dh, nil
 	}
